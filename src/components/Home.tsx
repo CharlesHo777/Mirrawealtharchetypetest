@@ -1,4 +1,5 @@
-import { useState, useRef } from 'react';
+import { useMemo, useRef, useState } from "react";
+import type { ActiveContentResponse, AnswerValue, ApiQuestion } from "../api/types";
 import { motion, AnimatePresence } from 'motion/react';
 import { Volume2, VolumeX } from 'lucide-react';
 import { Navigation } from './Navigation';
@@ -8,10 +9,14 @@ import { archetypes } from '../data/archetypes';
 
 interface HomeProps {
   onAssessmentComplete: (result: ArchetypeResult) => void;
-  onNavigate: (page: 'home' | 'result' | 'registry') => void;
+  onNavigate: (page: "home" | "result" | "registry") => void;
+
+  activeContent: ActiveContentResponse | null;
+  contentLoading: boolean;
+  contentError: string | null;
 }
 
-const questions = [
+const localQuestions = [
   // DIMENSION 1: Value Orientation (4 questions)
   {
     id: 1,
@@ -231,7 +236,69 @@ const questions = [
   },
 ];
 
-export function Home({ onAssessmentComplete, onNavigate }: HomeProps) {
+type NormalizedOption =
+  | { text: string; kind: "api"; value: AnswerValue }
+  | { text: string; kind: "local"; values: Partial<Record<string, number>> };
+
+type NormalizedQuestion = {
+  id: string;
+  source: "api" | "local";
+  dimension?: string;
+  title?: string;
+  prompt: string;
+  options: NormalizedOption[];
+};
+
+function getLikertRange(metadata?: Record<string, unknown>) {
+  const m = metadata ?? {};
+  const pick = (...keys: string[]) => {
+    for (const k of keys) {
+      const v = m[k];
+      if (typeof v === "number" && Number.isFinite(v)) return v;
+    }
+    return undefined;
+  };
+
+  const min = pick("min", "scaleMin", "likertMin", "rangeMin") ?? 1;
+  const max = pick("max", "scaleMax", "likertMax", "rangeMax") ?? 5;
+
+  return { min, max };
+}
+
+function normalizeApiQuestions(apiQuestions: ApiQuestion[]): NormalizedQuestion[] {
+  return apiQuestions
+    .slice()
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+    .map((q) => {
+      if (q.type === "MCQ" && Array.isArray(q.options)) {
+        const options = q.options
+          .slice()
+          .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+          .map((o) => ({ kind: "api" as const, text: o.label, value: o.value }));
+        return { id: q.id, source: "api", dimension: q.dimension, title: q.title, prompt: q.prompt, options };
+      }
+
+      // default to LIKERT-ish if unknown
+      const { min, max } = getLikertRange(q.metadata);
+      const options: NormalizedOption[] = [];
+      for (let v = min; v <= max; v++) options.push({ kind: "api", text: String(v), value: v });
+
+      return { id: q.id, source: "api", dimension: q.dimension, title: q.title, prompt: q.prompt, options };
+    });
+}
+
+function normalizeLocalQuestions(): NormalizedQuestion[] {
+  return localQuestions.map((q) => ({
+    id: String(q.id),
+    source: "local",
+    dimension: q.dimension,
+    title: q.title,
+    prompt: q.question,
+    options: q.options.map((o) => ({ kind: "local" as const, text: o.text, values: o.values })),
+  }));
+}
+
+export function Home({ onAssessmentComplete, onNavigate, activeContent, contentLoading, contentError }: HomeProps) {
   const [showQuestionnaire, setShowQuestionnaire] = useState(false);
   const [currentQuestion, setCurrentQuestion] = useState(0);
   const [isMuted, setIsMuted] = useState(false);
@@ -245,12 +312,24 @@ export function Home({ onAssessmentComplete, onNavigate }: HomeProps) {
     integration: 0,
     separation: 0,
   });
-  const questionnaireRef = useRef<HTMLDivElement>(null);
+
+  const isApiMode = !!activeContent?.questions?.length && !contentError;
+
+  const activeQuestions = useMemo(() => {
+    if (isApiMode) return normalizeApiQuestions(activeContent!.questions);
+    return normalizeLocalQuestions();
+  }, [isApiMode, activeContent, contentError]);
+
+  const [apiAnswers, setApiAnswers] = useState<Record<string, AnswerValue>>({});
+
   const audioRef = useRef<HTMLAudioElement>(null);
 
   const handleStartAssessment = () => {
     setShowQuestionnaire(true);
     setCurrentQuestion(0);
+
+    // Reset both modes safely
+    setApiAnswers({});
     setScores({
       preserver: 0,
       expander: 0,
@@ -261,31 +340,63 @@ export function Home({ onAssessmentComplete, onNavigate }: HomeProps) {
       integration: 0,
       separation: 0,
     });
-    
-    // Smooth scroll to questionnaire
+
     setTimeout(() => {
-      window.scrollTo({ 
-        top: window.innerHeight, 
-        behavior: 'smooth' 
-      });
+      window.scrollTo({ top: window.innerHeight, behavior: "smooth" });
     }, 300);
   };
 
-  const handleAnswer = (values: Record<string, number>) => {
-    const newScores = { ...scores };
-    Object.entries(values).forEach(([key, value]) => {
-      newScores[key as keyof typeof scores] += value;
-    });
-    setScores(newScores);
+  const handleOptionClick = (question: NormalizedQuestion, option: NormalizedOption) => {
+    if (option.kind === "api") {
+      setApiAnswers((prev) => ({ ...prev, [question.id]: option.value }));
 
-    if (currentQuestion < questions.length - 1) {
-      setCurrentQuestion(currentQuestion + 1);
-    } else {
-      calculateResult(newScores);
+      if (currentQuestion < activeQuestions.length - 1) {
+        setCurrentQuestion((q) => q + 1);
+        return;
+      }
+
+      // Temporary placeholder until we integrate /sessions + /submit scoring
+      onAssessmentComplete({
+        name: "Content loaded (backend-driven)",
+        animal: "Elephant",
+        description:
+          "You are now answering questions loaded from GET /content/active. Next we’ll create a session, persist answers to the backend, submit, and show the real scored archetype + HTML report.",
+        traits: [`Questions: ${activeQuestions.length}`, `ContentVersion: ${activeContent?.contentVersion?.id ?? "unknown"}`],
+        theme: "Integration in progress",
+        backgroundColor: "#F7F1E6",
+      });
+      return;
+    }
+
+    // Local/demo scoring path (your existing logic)
+    handleAnswer(option.values);
+  };
+
+  type ScoreDelta = Partial<Record<string, number>>;
+
+  const handleAnswer = (values: ScoreDelta) => {
+    setScores((prevScores) => {
+      const updatedScores: Record<string, number> = { ...(prevScores as Record<string, number>) };
+
+      for (const [k, v] of Object.entries(values)) {
+        if (typeof v !== "number") continue; // skips undefined
+        updatedScores[k] = (updatedScores[k] ?? 0) + v;
+      }
+
+      const isLast = currentQuestion >= activeQuestions.length - 1;
+      if (isLast) {
+        calculateResult(updatedScores); // ✅ this replaces your old calculateResult(newScores)
+      }
+
+      return updatedScores as typeof prevScores;
+    });
+
+    if (currentQuestion < activeQuestions.length - 1) {
+      setCurrentQuestion((q) => q + 1);
     }
   };
 
-  const calculateResult = (finalScores: typeof scores) => {
+  const calculateResult = (finalScores: Record<string, number>) => {
     // Determine dominant score in each dimension
     const dimension1 = finalScores.preserver >= finalScores.expander ? 'preserver' : 'expander';
     const dimension2 = finalScores.flow >= finalScores.anchor ? 'flow' : 'anchor';
@@ -389,8 +500,11 @@ export function Home({ onAssessmentComplete, onNavigate }: HomeProps) {
     }
   };
 
-  const question = questions[currentQuestion];
-  const progress = ((currentQuestion + 1) / questions.length) * 100;
+  // Safe index clamping
+  const safeIndex = Math.max(0, Math.min(currentQuestion, activeQuestions.length - 1));
+  const question = activeQuestions[safeIndex];
+  const progress =
+    activeQuestions.length > 0 ? ((safeIndex + 1) / activeQuestions.length) * 100 : 0;
 
   return (
     <div className="min-h-screen relative">
@@ -578,11 +692,24 @@ export function Home({ onAssessmentComplete, onNavigate }: HomeProps) {
                 animate={{ opacity: 1 }}
                 transition={{ delay: 0.8 }}
               >
+                {contentLoading && (
+                  <p className="font-['Montserrat'] text-sm text-[#C4A574] tracking-wide">
+                    Loading content...
+                  </p>
+                )}
+                
+                {contentError && (
+                  <p className="font-['Montserrat'] text-sm text-red-600 tracking-wide mb-4">
+                    {contentError}
+                  </p>
+                )}
+
                 <motion.button
                   onClick={handleStartAssessment}
-                  className="group relative overflow-hidden px-12 py-4 bg-[#C4A574] transition-all duration-300"
-                  whileHover={{ scale: 1.05 }}
-                  whileTap={{ scale: 0.98 }}
+                  disabled={contentLoading}
+                  className="group relative overflow-hidden px-12 py-4 bg-[#C4A574] transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                  whileHover={contentLoading ? {} : { scale: 1.05 }}
+                  whileTap={contentLoading ? {} : { scale: 0.98 }}
                 >
                   {/* Animated colorful gradient background on hover */}
                   <motion.div
@@ -619,13 +746,15 @@ export function Home({ onAssessmentComplete, onNavigate }: HomeProps) {
                   />
 
                   <span className="relative z-10 flex items-center gap-3 font-['Montserrat'] text-xs tracking-[0.25em] text-white uppercase">
-                    Begin Assessment
-                    <motion.span
-                      animate={{ x: [0, 5, 0] }}
-                      transition={{ duration: 1.5, repeat: Infinity }}
-                    >
-                      →
-                    </motion.span>
+                    {contentLoading ? 'Loading...' : 'Begin Assessment'}
+                    {!contentLoading && (
+                      <motion.span
+                        animate={{ x: [0, 5, 0] }}
+                        transition={{ duration: 1.5, repeat: Infinity }}
+                      >
+                        →
+                      </motion.span>
+                    )}
                   </span>
                 </motion.button>
               </motion.div>
@@ -634,7 +763,6 @@ export function Home({ onAssessmentComplete, onNavigate }: HomeProps) {
             {/* Questionnaire Section - appears below button, above divider */}
             {showQuestionnaire && (
               <motion.div
-                ref={questionnaireRef}
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.6 }}
@@ -654,31 +782,33 @@ export function Home({ onAssessmentComplete, onNavigate }: HomeProps) {
 
                 <AnimatePresence mode="wait">
                   <motion.div
-                    key={currentQuestion}
+                    key={safeIndex}
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
                     exit={{ opacity: 0 }}
                     transition={{ duration: 0.4 }}
                   >
                     <div className="mb-8 text-center">
-                      <p className="font-['Montserrat'] text-xs tracking-[0.25em] text-[#C4A574] uppercase mb-4">
-                        {question.dimension}
-                      </p>
+                      {question?.dimension && (
+                        <p className="font-['Montserrat'] text-xs tracking-[0.25em] text-[#C4A574] uppercase mb-4">
+                          {question.dimension}
+                        </p>
+                      )}
                       <h2 className="font-['Cinzel_Decorative'] text-3xl md:text-4xl font-normal text-[#3D3D3D] mb-6">
-                        {question.title}
+                        {question?.title ?? "Question"}
                       </h2>
                     </div>
 
                     <div className="relative">
                       <h3 className="font-['Montserrat'] text-base text-[#6B5D52] mb-8 leading-relaxed text-center">
-                        {question.question}
+                        {question?.prompt}
                       </h3>
 
                       <div className="grid gap-4 max-w-2xl mx-auto">
-                        {question.options.map((option, index) => (
+                        {question?.options?.map((option, index) => (
                           <motion.button
                             key={index}
-                            onClick={() => handleAnswer(option.values)}
+                            onClick={() => handleOptionClick(question, option)}
                             className="relative text-left p-5 bg-white/40 backdrop-blur-sm border-2 border-[#C4A574]/30 rounded-xl hover:border-[#C4A574] hover:bg-white/60 transition-all group overflow-hidden"
                             whileHover={{ scale: 1.01 }}
                             whileTap={{ scale: 0.99 }}
