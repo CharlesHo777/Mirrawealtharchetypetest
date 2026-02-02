@@ -40,12 +40,6 @@ export interface PatchAnswersRequest {
   answers: AnswerDTO[];
 }
 
-/**
- * Submit returns a "snapshot" (idempotent) according to your spec.
- * Keep as unknown for now; we’ll define a concrete type once you confirm the shape.
- */
-export type ResultSnapshot = unknown;
-
 export interface SubmitSessionRequest {
   email?: string;
 }
@@ -53,4 +47,36 @@ export interface SubmitSessionRequest {
 export interface SubmitSessionResponse {
   resultSnapshot: ResultSnapshot;
   [k: string]: unknown;
+}
+
+export type TraitKey = "preserver" | "expander" | "anchor" | "flow";
+
+// If your archetype keys are fixed, make this a union later.
+// For now keep it as string to avoid breaking when you add more archetypes.
+export type ArchetypeKey = string;
+
+export interface TraitPairWinner {
+  pair: [string, string];   // e.g. ["preserver","expander"]
+  winner: string;           // e.g. "preserver"
+}
+
+export interface ResultBreakdown {
+  pickedBy: string;                 // e.g. "traitPairs"
+  winners: TraitPairWinner[];
+  margins: number[];
+}
+
+export interface ResultSnapshot {
+  traitScores: Record<string, number>;  // e.g. { preserver: 4, expander: 1, ... }
+  archetypeKey: ArchetypeKey;           // e.g. "builder"
+  archetypeName: string;               // e.g. "The Builder"
+  confidence: number;                  // e.g. 0.1857...
+  breakdown: ResultBreakdown;
+}
+
+export interface SubmitSessionResponse {
+  sessionId: string;
+  contentVersionId: string;
+  resultSnapshot: ResultSnapshot;
+  submittedAt: string; // ISO datetime string
 }

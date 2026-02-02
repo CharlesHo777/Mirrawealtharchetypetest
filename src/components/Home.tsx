@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import type { ActiveContentResponse, AnswerValue, ApiQuestion, AnswerDTO } from "../api/types";
+import type { ActiveContentResponse, AnswerValue, ApiQuestion, AnswerDTO, SubmitSessionResponse } from "../api/types";
 import { motion, AnimatePresence } from 'motion/react';
 import { Volume2, VolumeX } from 'lucide-react';
 import { Navigation } from './Navigation';
@@ -358,6 +358,33 @@ function mapSnapshotToArchetypeResult(snapshot: any): ArchetypeResult {
   return { name, animal, description, traits, theme, backgroundColor };
 }
 
+// If your local archetypes are keyed by `animal`, decide what you want to use:
+// - If local uses archetypeKey: perfect
+// - If local uses animal names: just skip local enrichment
+function mapSubmitResponseToArchetypeResult(
+  res: SubmitSessionResponse,
+  archetypes: ArchetypeResult[]
+): ArchetypeResult {
+  const { archetypeKey, archetypeName } = res.resultSnapshot;
+
+  // Optional: enrich from local archetype library if you have one keyed similarly.
+  // If your local data is keyed by "animal", but backend uses "builder", adjust here.
+  const local = archetypes.find((x) => x.animal === archetypeKey);
+
+  if (local) return local;
+
+  // Otherwise create a minimal ArchetypeResult with backend truth.
+  // (You may later add a backend endpoint that returns full descriptions/traits/theme.)
+  return {
+    name: archetypeName,
+    animal: archetypeKey,
+    description: "",     // backend doesn’t send this in submit response
+    traits: [],          // backend doesn’t send this in submit response
+    theme: "",           // backend doesn’t send this in submit response
+    backgroundColor: "#F7F1E6",
+  };
+}
+
 export function Home({ onAssessmentComplete, onNavigate, activeContent, contentLoading, contentError }: HomeProps) {
   const [showQuestionnaire, setShowQuestionnaire] = useState(false);
   const [currentQuestion, setCurrentQuestion] = useState(0);
@@ -472,11 +499,13 @@ export function Home({ onAssessmentComplete, onNavigate, activeContent, contentL
         setSubmitting(true);
 
         const submitRes = await submitSession(sessionId, {});
-        // Helpful during integration: see what the backend actually returns
-        console.log("submit response:", submitRes);
+        console.log("submit response:", submitRes); // now typed
 
-        const result = mapSnapshotToArchetypeResult(submitRes);
+        const result = mapSubmitResponseToArchetypeResult(submitRes, archetypes);
         onAssessmentComplete(result);
+        // If you also want to store snapshot for later UI (recommended):
+        // setResultSnapshot(submitRes.resultSnapshot);
+
       } catch (e) {
         console.error("Failed to submit session:", e);
         setSubmitError("Failed to calculate your result. Please try again.");

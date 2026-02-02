@@ -28,8 +28,15 @@ export function patchSessionAnswers(sessionId: string, body: PatchAnswersRequest
   });
 }
 
-export function submitSession(sessionId: string, body: SubmitSessionRequest = {}) {
-  // POST /sessions/:id/submit
+// export function submitSession(sessionId: string, body: SubmitSessionRequest = {}) {
+//   // POST /sessions/:id/submit
+//   return fetchJSON<SubmitSessionResponse>(`/sessions/${sessionId}/submit`, {
+//     method: "POST",
+//     body: JSON.stringify(body),
+//   });
+// }
+
+export function submitSession(sessionId: string, body: Record<string, unknown> = {}) {
   return fetchJSON<SubmitSessionResponse>(`/sessions/${sessionId}/submit`, {
     method: "POST",
     body: JSON.stringify(body),
